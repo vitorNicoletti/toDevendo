@@ -1,0 +1,5 @@
+.env
+/mysql_data
+/.sessions
+/.claude
+__pycache__/

@@ -1,0 +1,43 @@
+services:
+  waha:
+    image: devlikeapro/waha
+    restart: always
+    ports:
+      - "${WAHA_PORT:-3000}:3000" # O :-3000 é um valor padrão caso não tenha no .env
+    volumes:
+      - ./.sessions:/app/.sessions
+    environment:
+      - WAHA_API_KEY=${WAHA_API_KEY}
+      - WHATSAPP_HOOK_URL=http://to-devendo:3001/webhook  # WAHA envia mensagens recebidas para sua app
+      - WHATSAPP_HOOK_EVENTS=message.any                    # message.any=todas (recebidas e enviadas)
+      - WHATSAPP_RESTART_ALL_SESSIONS=True                # restaura sessões após restart do container
+      - WAHA_PRINT_QR=True                                # imprime QR no log para autenticar
+
+  to-devendo:
+    build: ./app
+    depends_on:
+      - waha
+      - db
+    expose:
+      - "3001"  # porta interna que recebe os webhooks do WAHA
+    environment:
+      - WAHA_URL=http://waha:3000
+      - WAHA_API_KEY=${WAHA_API_KEY}
+      - ALLOWED_GROUP_IDS=${ALLOWED_GROUP_IDS}
+      - DB_URL=mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/todevendo
+
+    volumes:
+      - ./app:/app  # Espelha seu código em tempo re
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: todevendo # Adicionei isso para o init.sql saber onde rodar
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./schemaBanco.sql:/docker-entrypoint-initdb.d/init.sql:ro # :ro significa "read only"
+      - ./mysql_data:/var/lib/mysql # Pasta que guardará seus dados no seu PC
