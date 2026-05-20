@@ -3,7 +3,7 @@ USE todevendo;
 
 CREATE TABLE IF NOT EXISTS Usuario (
     id          INT AUTO_INCREMENT PRIMARY KEY,
-    jid         VARCHAR(64)  NOT NULL UNIQUE,
+    telefone    VARCHAR(20)  NOT NULL UNIQUE,   -- número puro, só dígitos (ex: 5511999999999)
     nome        VARCHAR(255) NOT NULL,
     dt_registro DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     chave_pix   VARCHAR(40)     NULL
@@ -26,9 +26,13 @@ CREATE TABLE IF NOT EXISTS Divida (
     CONSTRAINT fk_registrou_a_divida FOREIGN KEY (id_registrou_a_divida) REFERENCES Usuario(id)
 );
 
-CREATE TABLE IF NOT EXISTS LidMap (
+-- Vincula os IDs opacos @lid do WhatsApp a um Usuario. Um usuário pode ter
+-- vários lids; cada lid pertence a um único usuário.
+CREATE TABLE IF NOT EXISTS UsuarioLid (
     lid        VARCHAR(64) PRIMARY KEY,
-    pn         VARCHAR(64) NOT NULL,
+    id_usuario INT         NOT NULL,
     updated_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_lidmap_pn (pn)
+
+    CONSTRAINT fk_usuariolid_usuario FOREIGN KEY (id_usuario) REFERENCES Usuario(id),
+    INDEX idx_usuariolid_usuario (id_usuario)
 );
