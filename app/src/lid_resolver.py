@@ -73,21 +73,25 @@ class LidResolver:
         do grupo. Devolve {} se a consulta falhar — o WhatsApp é a única fonte
         de lid -> número."""
         headers = {"X-Api-Key": self.waha_api_key} if self.waha_api_key else {}
+        url = f"{self.waha_url}/api/{self.waha_session}/groups/{self.group_id}/participants"
         try:
-            r = await self.http.get(
-                f"{self.waha_url}/api/{self.waha_session}/groups/{self.group_id}/participants",
-                headers=headers,
-            )
-        except httpx.HTTPError:
+            r = await self.http.get(url, headers=headers)
+        except httpx.HTTPError as e:
+            print(f"[WAHA participants] FALHOU: {e!r} (url={url})")
             return {}
         if r.status_code != 200:
+            print(f"[WAHA participants] status={r.status_code} body={r.text!r} (url={url})")
             return {}
 
+        participantes = r.json() or []
+        print(f"[WAHA participants] {len(participantes)} participantes (cru): {participantes!r}")
+
         mapa: dict[str, str] = {}
-        for p in r.json() or []:
+        for p in participantes:
             lid, telefone = self._extrair_ids(p)
             if lid and telefone:
                 mapa[lid] = telefone
+        print(f"[WAHA participants] mapa lid->telefone: {mapa!r}")
         return mapa
 
     # --- cache ---
