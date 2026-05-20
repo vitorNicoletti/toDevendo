@@ -24,32 +24,32 @@ def _validar_pix(chave: str) -> str:
     return chave
 
 
-def cadastrar(session: Session, jid: str, nome: str) -> tuple[Usuario, bool]:
+def cadastrar(session: Session, telefone: str, nome: str) -> tuple[Usuario, bool]:
     """Retorna (usuario, criado). Se já existe, atualiza o nome."""
     nome = _validar_nome(nome)
-    usuario = session.query(Usuario).filter_by(jid=jid).first()
+    usuario = session.query(Usuario).filter_by(telefone=telefone).first()
     if usuario:
         usuario.nome = nome
         session.commit()
         return usuario, False
-    usuario = Usuario(jid=jid, nome=nome)
+    usuario = Usuario(telefone=telefone, nome=nome)
     session.add(usuario)
     session.commit()
     session.refresh(usuario)
     return usuario, True
 
 
-def get_by_jid(session: Session, jid: str) -> Usuario | None:
-    return session.query(Usuario).filter_by(jid=jid).first()
+def get_by_telefone(session: Session, telefone: str) -> Usuario | None:
+    return session.query(Usuario).filter_by(telefone=telefone).first()
 
 
 def get_by_id(session: Session, id_usuario: int) -> Usuario | None:
     return session.query(Usuario).filter_by(id=id_usuario).first()
 
 
-def salvar_pix(session: Session, jid: str, chave: str) -> Usuario:
+def salvar_pix(session: Session, telefone: str, chave: str) -> Usuario:
     chave = _validar_pix(chave)
-    usuario = session.query(Usuario).filter_by(jid=jid).first()
+    usuario = session.query(Usuario).filter_by(telefone=telefone).first()
     if not usuario:
         raise ValueError("Você ainda não está cadastrado. Use !cadastro Seu Nome primeiro.")
     usuario.chave_pix = chave
