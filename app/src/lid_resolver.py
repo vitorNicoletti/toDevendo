@@ -1,125 +1,139 @@
+import re
 import httpx
 from sqlalchemy.orm import Session
-from src.models.lid_map import LidMap
+
+from src.controllers import usuario_lid_controller as ulc
 
 
-def _is_lid(jid: str) -> bool:
-    return isinstance(jid, str) and jid.endswith("@lid")
+class LidResolver:
+    """Resolve identificadores do WhatsApp no telefone canônico (só dígitos).
 
+    Uma instância vale por requisição: agrupa a sessão de banco, o cliente
+    HTTP, o grupo em questão e os dados de acesso à WAHA — assim os métodos
+    não precisam repassar tudo isso a cada chamada.
+    """
 
-def _extract_ids(participant: dict) -> tuple[str | None, str | None]:
-    """Extrai (lid, pn) de um participante WAHA, tolerando variações de schema entre engines."""
-    pid = participant.get("id")
-    serialized = pid.get("_serialized") if isinstance(pid, dict) else pid
+    def __init__(
+        self,
+        db: Session,
+        http: httpx.AsyncClient,
+        group_id: str | None,
+        waha_url: str,
+        waha_api_key: str | None,
+        waha_session: str,
+    ):
+        self.db = db
+        self.http = http
+        self.group_id = group_id
+        self.waha_url = waha_url
+        self.waha_api_key = waha_api_key
+        self.waha_session = waha_session
 
-    lid = None
-    pn = participant.get("phoneNumber") or participant.get("pn")
+    # --- helpers de string (sem estado) ---
 
-    if isinstance(serialized, str):
-        if serialized.endswith("@lid"):
-            lid = serialized
-        elif serialized.endswith("@c.us") or serialized.endswith("@s.whatsapp.net"):
-            pn = pn or serialized
+    @staticmethod
+    def is_lid(wa_id: str) -> bool:
+        """True se o identificador é um @lid (ID opaco do WhatsApp)."""
+        return isinstance(wa_id, str) and wa_id.endswith("@lid")
 
-    # alguns engines retornam dois campos lado a lado
-    alt_lid = participant.get("lid")
-    if isinstance(alt_lid, str) and alt_lid.endswith("@lid"):
-        lid = lid or alt_lid
+    @staticmethod
+    def so_digitos(valor: str) -> str:
+        """Reduz qualquer JID de telefone ao número puro.
+        Ex: '5511999@c.us' -> '5511999', '+55 11 99999' -> '5511999'."""
+        return re.sub(r"\D", "", valor or "")
 
-    if isinstance(pn, str) and not (pn.endswith("@c.us") or pn.endswith("@s.whatsapp.net")):
-        # pn pode vir como número puro "5511999..."; normaliza
-        pn = f"{pn.lstrip('+').split('@')[0]}@c.us"
+    @staticmethod
+    def _extrair_ids(participante: dict) -> tuple[str | None, str | None]:
+        """Extrai (lid, telefone) de um participante WAHA, tolerando variações
+        de schema. O telefone vem normalizado como número puro (só dígitos)."""
+        pid = participante.get("id")
+        serializado = pid.get("_serialized") if isinstance(pid, dict) else pid
 
-    return lid, pn
+        lid = None
+        telefone = participante.get("phoneNumber") or participante.get("pn")
 
+        if isinstance(serializado, str):
+            if serializado.endswith("@lid"):
+                lid = serializado
+            elif serializado.endswith("@c.us") or serializado.endswith("@s.whatsapp.net"):
+                telefone = telefone or serializado
 
-async def populate_from_group(
-    group_id: str,
-    db: Session,
-    http: httpx.AsyncClient,
-    waha_url: str,
-    waha_api_key: str | None,
-    waha_session: str,
-) -> int:
-    """Busca participantes do grupo na WAHA e popula o LidMap. Retorna quantos foram salvos/atualizados."""
-    headers = {"X-Api-Key": waha_api_key} if waha_api_key else {}
-    r = await http.get(
-        f"{waha_url}/api/{waha_session}/groups/{group_id}/participants",
-        headers=headers,
-    )
-    if r.status_code != 200:
-        return 0
+        # alguns engines retornam dois campos lado a lado
+        alt_lid = participante.get("lid")
+        if isinstance(alt_lid, str) and alt_lid.endswith("@lid"):
+            lid = lid or alt_lid
 
-    salvos = 0
-    for p in r.json() or []:
-        lid, pn = _extract_ids(p)
-        if not lid or not pn or lid == pn:
-            continue
-        existente = db.query(LidMap).filter_by(lid=lid).first()
-        if existente:
-            if existente.pn != pn:
-                existente.pn = pn
-                salvos += 1
-        else:
-            db.add(LidMap(lid=lid, pn=pn))
-            salvos += 1
-    db.commit()
-    return salvos
+        telefone = LidResolver.so_digitos(telefone) if telefone else None
+        return lid, (telefone or None)
 
+    # --- WAHA ---
 
-async def resolve(
-    jid: str,
-    group_id: str | None,
-    db: Session,
-    http: httpx.AsyncClient,
-    waha_url: str,
-    waha_api_key: str | None,
-    waha_session: str,
-) -> str:
-    """Resolve @lid → @c.us via cache + WAHA. Se não conseguir resolver, retorna o jid original."""
-    if not _is_lid(jid):
-        return jid
+    async def _buscar_participantes(self) -> dict[str, str]:
+        """Consulta a WAHA e devolve {lid: telefone} de todos os participantes
+        do grupo. Devolve {} se a consulta falhar — o WhatsApp é a única fonte
+        de lid -> número."""
+        headers = {"X-Api-Key": self.waha_api_key} if self.waha_api_key else {}
+        try:
+            r = await self.http.get(
+                f"{self.waha_url}/api/{self.waha_session}/groups/{self.group_id}/participants",
+                headers=headers,
+            )
+        except httpx.HTTPError:
+            return {}
+        if r.status_code != 200:
+            return {}
 
-    cached = db.query(LidMap).filter_by(lid=jid).first()
-    if cached:
-        return cached.pn
+        mapa: dict[str, str] = {}
+        for p in r.json() or []:
+            lid, telefone = self._extrair_ids(p)
+            if lid and telefone:
+                mapa[lid] = telefone
+        return mapa
 
-    if not group_id or not group_id.endswith("@g.us"):
-        return jid
+    # --- cache ---
 
-    await populate_from_group(group_id, db, http, waha_url, waha_api_key, waha_session)
+    async def _garantir_cache(self, lids: list[str]) -> dict[str, str]:
+        """Garante que os @lid informados tenham vínculo em cache, consultando
+        a WAHA uma única vez se algum estiver faltando. Retorna o {lid: telefone}
+        obtido da WAHA, ou {} quando não foi preciso consultar."""
+        if not lids or not self.group_id or not self.group_id.endswith("@g.us"):
+            return {}
+        faltam = [l for l in lids if not ulc.existe_vinculo(self.db, l)]
+        if not faltam:
+            return {}
+        mapa = await self._buscar_participantes()
+        ulc.cachear_vinculos(self.db, mapa)
+        return mapa
 
-    cached = db.query(LidMap).filter_by(lid=jid).first()
-    return cached.pn if cached else jid
+    # --- API pública ---
 
+    async def resolver(self, wa_id: str) -> str:
+        """Converte um identificador cru do WhatsApp no telefone canônico.
 
-async def resolve_many(
-    jids: list[str],
-    group_id: str | None,
-    db: Session,
-    http: httpx.AsyncClient,
-    waha_url: str,
-    waha_api_key: str | None,
-    waha_session: str,
-) -> list[str]:
-    """Resolve uma lista, evitando múltiplas chamadas à WAHA quando vários LIDs vêm do mesmo grupo."""
-    if not jids:
-        return []
+        - JID de telefone (@c.us / @s.whatsapp.net) -> número puro.
+        - @lid -> telefone vinculado (cache UsuarioLid; consulta a WAHA se preciso).
+        - @lid que a WAHA não conhece -> retorna o próprio @lid (não resolvido).
+        """
+        resolvidos = await self.resolver_muitos([wa_id])
+        return resolvidos[0]
 
-    lids = [j for j in jids if _is_lid(j)]
-    if lids and group_id and group_id.endswith("@g.us"):
-        faltam = [
-            l for l in lids
-            if not db.query(LidMap).filter_by(lid=l).first()
-        ]
-        if faltam:
-            await populate_from_group(group_id, db, http, waha_url, waha_api_key, waha_session)
+    async def resolver_muitos(self, wa_ids: list[str]) -> list[str]:
+        """Resolve uma lista de identificadores, consultando a WAHA no máximo
+        uma vez quando há @lid sem vínculo em cache."""
+        if not wa_ids:
+            return []
 
-    resolvidos = []
-    for j in jids:
-        if not _is_lid(j):
-            resolvidos.append(j)
-            continue
-        cached = db.query(LidMap).filter_by(lid=j).first()
-        resolvidos.append(cached.pn if cached else j)
-    return resolvidos
+        lids = [w for w in wa_ids if self.is_lid(w)]
+        mapa = await self._garantir_cache(lids)
+
+        resolvidos: list[str] = []
+        for w in wa_ids:
+            if not self.is_lid(w):
+                resolvidos.append(self.so_digitos(w))
+                continue
+            usuario = ulc.get_usuario_por_lid(self.db, w)
+            if usuario:
+                resolvidos.append(usuario.telefone)
+            else:
+                resolvidos.append(mapa.get(w) or w)
+        return resolvidos

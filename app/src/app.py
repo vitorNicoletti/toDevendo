@@ -1,18 +1,18 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 import httpx
 import os
 
 from src.database import get_session
 from src import commands
-from src import lid_resolver
-from src.models.usuario import Usuario
+from src.lid_resolver import LidResolver
 
 app = FastAPI()
 
 WAHA_URL = os.getenv("WAHA_URL", "http://waha:3000")
 WAHA_API_KEY = os.getenv("WAHA_API_KEY")
 ALLOWED_GROUP_ID = os.getenv("ALLOWED_GROUP_IDS", "naovaiacharnada")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+BOT_NAME = os.getenv("BOT_NAME", "NicoBot")
+BOT_TAG = f"[{BOT_NAME}]"
 
 
 @app.post("/webhook")
@@ -34,11 +34,11 @@ async def webhook(request: Request):
     is_group = to_id.endswith("@g.us") or from_id.endswith("@g.us")
     group_id = to_id if to_id.endswith("@g.us") else from_id
 
-    sender_jid_raw = payload.get("participant") or from_id
-    sender_name = payload.get("_data", {}).get("notifyName", "")
+    remetente_wa_id = payload.get("participant") or from_id
+    remetente_nome = payload.get("_data", {}).get("notifyName", "")
 
-    from_bot = text.startswith("[NicoBot]")
-    mentions_raw = payload.get("_data", {}).get("mentionedJidList", [])
+    from_bot = text.startswith(BOT_TAG)
+    mencionados_wa_id = payload.get("_data", {}).get("mentionedJidList", [])
 
     if event != "message.any" or not is_group or group_id != ALLOWED_GROUP_ID or from_bot:
         return {"status": "ok"}
@@ -46,76 +46,25 @@ async def webhook(request: Request):
     db = get_session()
     try:
         async with httpx.AsyncClient() as http:
-            sender_jid = await lid_resolver.resolve(
-                sender_jid_raw, group_id, db, http, WAHA_URL, WAHA_API_KEY, session
-            )
-            mentions = await lid_resolver.resolve_many(
-                mentions_raw, group_id, db, http, WAHA_URL, WAHA_API_KEY, session
-            )
+            resolver = LidResolver(db, http, group_id, WAHA_URL, WAHA_API_KEY, session)
+            remetente_tel = await resolver.resolver(remetente_wa_id)
+            mencionados_tel = await resolver.resolver_muitos(mencionados_wa_id)
 
         print(
-            f"group_id={group_id} sender={sender_jid} (raw={sender_jid_raw!r}, {sender_name!r}) "
-            f"from_me={from_me} text={text!r} mentions={mentions} (raw={mentions_raw})"
+            f"group_id={group_id} remetente={remetente_tel} "
+            f"(wa_id={remetente_wa_id!r}, {remetente_nome!r}) "
+            f"from_me={from_me} text={text!r} mencionados={mencionados_tel}"
         )
 
-        resposta = commands.dispatch(text, sender_jid, mentions, db)
+        resposta = commands.dispatch(text, remetente_tel, mencionados_tel, db)
 
         if resposta:
             async with httpx.AsyncClient() as http:
-                await reply(http, session, group_id, f"[NicoBot] {resposta}")
+                await reply(http, session, group_id, f"{BOT_TAG} {resposta}")
     finally:
         db.close()
 
     return {"status": "ok"}
-
-
-@app.post("/admin/migrate-jids")
-async def migrate_jids(request: Request):
-    """Resolve usuários com jid @lid para @c.us usando o LidMap (populado via WAHA).
-    Body: {"group_id": "...@g.us", "session": "default"}
-    Header: X-Admin-Token: <ADMIN_TOKEN>
-    """
-    if ADMIN_TOKEN and request.headers.get("X-Admin-Token") != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-    body = await request.json()
-    group_id = body.get("group_id") or ALLOWED_GROUP_ID
-    session = body.get("session", "default")
-    if not group_id.endswith("@g.us"):
-        raise HTTPException(status_code=400, detail="group_id inválido")
-
-    db = get_session()
-    try:
-        async with httpx.AsyncClient() as http:
-            populados = await lid_resolver.populate_from_group(
-                group_id, db, http, WAHA_URL, WAHA_API_KEY, session
-            )
-
-            usuarios = db.query(Usuario).filter(Usuario.jid.like("%@lid")).all()
-            atualizados, nao_resolvidos = [], []
-            for u in usuarios:
-                novo = await lid_resolver.resolve(
-                    u.jid, group_id, db, http, WAHA_URL, WAHA_API_KEY, session
-                )
-                if novo != u.jid:
-                    colidente = db.query(Usuario).filter_by(jid=novo).first()
-                    if colidente and colidente.id != u.id:
-                        nao_resolvidos.append({"id": u.id, "lid": u.jid, "motivo": f"colisão com id={colidente.id}"})
-                        continue
-                    antigo = u.jid
-                    u.jid = novo
-                    atualizados.append({"id": u.id, "de": antigo, "para": novo})
-                else:
-                    nao_resolvidos.append({"id": u.id, "lid": u.jid, "motivo": "sem mapeamento no LidMap"})
-            db.commit()
-
-        return {
-            "lid_map_populados": populados,
-            "atualizados": atualizados,
-            "nao_resolvidos": nao_resolvidos,
-        }
-    finally:
-        db.close()
 
 
 async def reply(http: httpx.AsyncClient, session: str, chat_id: str, text: str):

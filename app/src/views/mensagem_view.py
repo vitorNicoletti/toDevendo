@@ -36,6 +36,10 @@ def usuario_nao_encontrado() -> str:
     return "❌ Usuário não encontrado. Ele precisa se cadastrar com *!cadastro Nome*."
 
 
+def nao_identificado() -> str:
+    return "❌ Não consegui te identificar agora. Tente novamente em alguns instantes."
+
+
 # --- Divida ---
 
 def divida_registrada(divida: Divida, nome_devedor: str, nome_credor: str) -> str:
