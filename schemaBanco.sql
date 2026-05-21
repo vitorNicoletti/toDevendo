@@ -3,7 +3,7 @@ USE todevendo;
 
 CREATE TABLE IF NOT EXISTS Usuario (
     id          INT AUTO_INCREMENT PRIMARY KEY,
-    jid         VARCHAR(64)  NOT NULL UNIQUE,
+    jid         VARCHAR(64)  NOT NULL UNIQUE,   -- identificador do WhatsApp (@lid ou @c.us)
     nome        VARCHAR(255) NOT NULL,
     dt_registro DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     chave_pix   VARCHAR(40)     NULL
@@ -24,11 +24,4 @@ CREATE TABLE IF NOT EXISTS Divida (
     CONSTRAINT fk_devedor            FOREIGN KEY (id_devedor)            REFERENCES Usuario(id),
     CONSTRAINT fk_credor             FOREIGN KEY (id_credor)             REFERENCES Usuario(id),
     CONSTRAINT fk_registrou_a_divida FOREIGN KEY (id_registrou_a_divida) REFERENCES Usuario(id)
-);
-
-CREATE TABLE IF NOT EXISTS LidMap (
-    lid        VARCHAR(64) PRIMARY KEY,
-    pn         VARCHAR(64) NOT NULL,
-    updated_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_lidmap_pn (pn)
 );

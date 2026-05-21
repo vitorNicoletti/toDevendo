@@ -15,6 +15,7 @@ services:
 
   to-devendo:
     build: ./app
+    restart: always
     depends_on:
       - waha
       - db
@@ -24,6 +25,7 @@ services:
       - WAHA_URL=http://waha:3000
       - WAHA_API_KEY=${WAHA_API_KEY}
       - ALLOWED_GROUP_IDS=${ALLOWED_GROUP_IDS}
+      - BOT_NAME=${BOT_NAME:-NicoBot}
       - DB_URL=mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/todevendo
 
     volumes:

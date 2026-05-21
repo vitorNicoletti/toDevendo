@@ -1,18 +1,46 @@
-from fastapi import FastAPI, Request, HTTPException
+from collections import OrderedDict
+
+from fastapi import FastAPI, Request
 import httpx
 import os
 
 from src.database import get_session
 from src import commands
-from src import lid_resolver
-from src.models.usuario import Usuario
 
 app = FastAPI()
 
 WAHA_URL = os.getenv("WAHA_URL", "http://waha:3000")
 WAHA_API_KEY = os.getenv("WAHA_API_KEY")
 ALLOWED_GROUP_ID = os.getenv("ALLOWED_GROUP_IDS", "naovaiacharnada")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+BOT_NAME = os.getenv("BOT_NAME", "NicoBot")
+BOT_TAG = f"[{BOT_NAME}]"
+
+# Idempotência: a WAHA reentrega o mesmo webhook quando o handler demora a
+# responder. Guardamos os IDs já processados (janela curta, em memória) para
+# não responder duas vezes à mesma mensagem.
+_MAX_IDS_PROCESSADOS = 500
+_ids_processados: "OrderedDict[str, None]" = OrderedDict()
+
+
+def _id_da_mensagem(payload: dict) -> str | None:
+    """Extrai o ID único da mensagem, tolerando variações de schema da WAHA."""
+    mid = payload.get("id")
+    if isinstance(mid, dict):
+        mid = mid.get("_serialized")
+    return mid if isinstance(mid, str) and mid else None
+
+
+def _ja_processada(msg_id: str | None) -> bool:
+    """True se esta mensagem já foi processada (reentrega da WAHA).
+    Sem ID, não há como deduplicar — trata como nova."""
+    if not msg_id:
+        return False
+    if msg_id in _ids_processados:
+        return True
+    _ids_processados[msg_id] = None
+    if len(_ids_processados) > _MAX_IDS_PROCESSADOS:
+        _ids_processados.popitem(last=False)
+    return False
 
 
 @app.post("/webhook")
@@ -34,88 +62,36 @@ async def webhook(request: Request):
     is_group = to_id.endswith("@g.us") or from_id.endswith("@g.us")
     group_id = to_id if to_id.endswith("@g.us") else from_id
 
-    sender_jid_raw = payload.get("participant") or from_id
-    sender_name = payload.get("_data", {}).get("notifyName", "")
+    # identificador do WhatsApp de quem enviou (@lid ou @c.us) — usado direto
+    remetente_jid = payload.get("participant") or from_id
+    remetente_nome = payload.get("_data", {}).get("notifyName", "")
 
-    from_bot = text.startswith("[NicoBot]")
-    mentions_raw = payload.get("_data", {}).get("mentionedJidList", [])
+    from_bot = text.startswith(BOT_TAG)
+    mencionados = payload.get("_data", {}).get("mentionedJidList", [])
 
     if event != "message.any" or not is_group or group_id != ALLOWED_GROUP_ID or from_bot:
         return {"status": "ok"}
 
+    # ignora reentregas do mesmo webhook (precisa vir antes de qualquer await)
+    if _ja_processada(_id_da_mensagem(payload)):
+        return {"status": "ok"}
+
     db = get_session()
     try:
-        async with httpx.AsyncClient() as http:
-            sender_jid = await lid_resolver.resolve(
-                sender_jid_raw, group_id, db, http, WAHA_URL, WAHA_API_KEY, session
-            )
-            mentions = await lid_resolver.resolve_many(
-                mentions_raw, group_id, db, http, WAHA_URL, WAHA_API_KEY, session
-            )
-
         print(
-            f"group_id={group_id} sender={sender_jid} (raw={sender_jid_raw!r}, {sender_name!r}) "
-            f"from_me={from_me} text={text!r} mentions={mentions} (raw={mentions_raw})"
+            f"group_id={group_id} remetente={remetente_jid} ({remetente_nome!r}) "
+            f"from_me={from_me} text={text!r} mencionados={mencionados}"
         )
 
-        resposta = commands.dispatch(text, sender_jid, mentions, db)
+        resposta = commands.dispatch(text, remetente_jid, mencionados, db)
 
         if resposta:
             async with httpx.AsyncClient() as http:
-                await reply(http, session, group_id, f"[NicoBot] {resposta}")
+                await reply(http, session, group_id, f"{BOT_TAG} {resposta}")
     finally:
         db.close()
 
     return {"status": "ok"}
-
-
-@app.post("/admin/migrate-jids")
-async def migrate_jids(request: Request):
-    """Resolve usuários com jid @lid para @c.us usando o LidMap (populado via WAHA).
-    Body: {"group_id": "...@g.us", "session": "default"}
-    Header: X-Admin-Token: <ADMIN_TOKEN>
-    """
-    if ADMIN_TOKEN and request.headers.get("X-Admin-Token") != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-    body = await request.json()
-    group_id = body.get("group_id") or ALLOWED_GROUP_ID
-    session = body.get("session", "default")
-    if not group_id.endswith("@g.us"):
-        raise HTTPException(status_code=400, detail="group_id inválido")
-
-    db = get_session()
-    try:
-        async with httpx.AsyncClient() as http:
-            populados = await lid_resolver.populate_from_group(
-                group_id, db, http, WAHA_URL, WAHA_API_KEY, session
-            )
-
-            usuarios = db.query(Usuario).filter(Usuario.jid.like("%@lid")).all()
-            atualizados, nao_resolvidos = [], []
-            for u in usuarios:
-                novo = await lid_resolver.resolve(
-                    u.jid, group_id, db, http, WAHA_URL, WAHA_API_KEY, session
-                )
-                if novo != u.jid:
-                    colidente = db.query(Usuario).filter_by(jid=novo).first()
-                    if colidente and colidente.id != u.id:
-                        nao_resolvidos.append({"id": u.id, "lid": u.jid, "motivo": f"colisão com id={colidente.id}"})
-                        continue
-                    antigo = u.jid
-                    u.jid = novo
-                    atualizados.append({"id": u.id, "de": antigo, "para": novo})
-                else:
-                    nao_resolvidos.append({"id": u.id, "lid": u.jid, "motivo": "sem mapeamento no LidMap"})
-            db.commit()
-
-        return {
-            "lid_map_populados": populados,
-            "atualizados": atualizados,
-            "nao_resolvidos": nao_resolvidos,
-        }
-    finally:
-        db.close()
 
 
 async def reply(http: httpx.AsyncClient, session: str, chat_id: str, text: str):
